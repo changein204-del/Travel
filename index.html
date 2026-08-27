@@ -444,6 +444,7 @@ const firebaseConfig = {
 const FIRESTORE_COLLECTION = 'trips';
 const FIRESTORE_DOC = 'default';
 const CLIENT_ID = 'c' + Math.random().toString(36).slice(2, 12);
+let localWriteSeq = 0;
 
 let firestoreDb = null;
 let firestoreReady = false;
@@ -662,13 +663,28 @@ async function initRealtime(){
       try{ parsed = JSON.parse(raw.json); }catch(e){ parsed = defaultData(); }
       parsed = migrateData(parsed);
       const isOwnEcho = parsed._lastEditor === CLIENT_ID;
+
+      if(isOwnEcho){
+        // This snapshot reflects one of OUR writes. If it's older than the
+        // latest write we've since sent (i.e. it arrived out of order /
+        // late), ignore it completely so it can't clobber newer local edits.
+        if((parsed._seq || 0) < localWriteSeq){
+          firestoreReady = true;
+          return;
+        }
+        DATA = parsed; // caught up to our latest write — safe to sync silently
+        if(!activeDay || !DATA.days.find(d=>d.id===activeDay)) activeDay = DATA.days[0]?.id;
+        firestoreReady = true;
+        showBanner('', '');
+        return; // no re-render needed, local UI already reflects this state
+      }
+
+      // Someone else's change came in — adopt it and refresh everything
       DATA = parsed;
       if(!activeDay || !DATA.days.find(d=>d.id===activeDay)) activeDay = DATA.days[0]?.id;
       firestoreReady = true;
       showBanner('', '');
-      if(!isOwnEcho){
-        fullRender(); // someone else's change came in — refresh everything
-      }
+      fullRender();
     }, (err)=>{
       console.error('Firestore listen error', err);
       showBanner('error', '⚠️ 連線資料庫失敗，請確認 Firestore 安全規則與設定是否正確。錯誤：' + err.message);
@@ -684,6 +700,8 @@ async function initRealtime(){
 
 async function persist(){
   DATA._lastEditor = CLIENT_ID;
+  localWriteSeq += 1;
+  DATA._seq = localWriteSeq;
   if(!firestoreDb || !firestoreReady){
     return; // not connected yet — changes stay local only until DB is configured
   }
